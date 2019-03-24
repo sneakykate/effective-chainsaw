@@ -1,0 +1,95 @@
+version: '2.1'
+services:
+    redis:
+        image: redis:alpine
+        ports:
+            - "6379:6379"
+        networks:
+            - net
+        healthcheck:
+            test: ["CMD-SHELL", "redis-cli ping"]
+            interval: 5s
+            timeout: 10s
+            retries: 3
+
+    etcd:
+        build:
+            context: ./docker/etcd/
+        image: etcd:latest
+        hostname: etcd
+        environment:
+            - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+            - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+            - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+        networks:
+            - net
+        volumes:
+            - ./bootstrap_etcd.json:/home/bootstrap_etcd.json
+        healthcheck:
+            test: ["CMD-SHELL", "etcdctl ls /vars/"]
+            interval: 5s
+            timeout: 10s
+            retries: 3
+
+    postgres:
+        image: postgres:alpine
+        environment:
+            - POSTGRES_USER=airflow
+            - POSTGRES_PASSWORD=airflow
+            - POSTGRES_DB=airflow
+            - PGDATA=/var/lib/postgresql/data/pgdata
+        networks:
+            - net
+        healthcheck:
+            test: ["CMD-SHELL", "psql postgresql://airflow:airflow@localhost:5432/airflow -c '\\q'"]
+            interval: 10s
+            timeout: 10s
+            retries: 3
+
+    fakes3:
+        image: lphoward/fake-s3
+        ports:
+            - "4569:4569"
+        networks:
+            - net
+        volumes:
+            - ./fakes3_root:/fakes3_root
+
+    webserver:
+        build: ./
+        image: stemairflow
+        restart: always
+        depends_on:
+            postgres:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        environment:
+            - AIRFLOW_INIT_DB=1
+            - ETCD_PROTOCOL=http
+            - ETCD_HOST=etcd
+            - ETCD_PORT=2379
+            - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+            - AIRFLOW__CORE__PARALLELISM=16
+            - AIRFLOW__CORE__FERNET_KEY=46BKJoQYlPPOexq0OhDZnIlNepKFf87WFwLbfzqDDho=
+            - AIRFLOW__CORE__SQL_ALCHEMY_CONN=postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
+        networks:
+            - net
+        volumes:
+            - ./dags:/airflow/dags
+            - /var/run/docker.sock:/var/run/docker.sock
+            # Uncomment to include custom plugins
+            # - ./plugins:/usr/local/airflow/plugins
+        ports:
+            - "8080:8080"
+        healthcheck:
+            test: ["CMD-SHELL", "[ -f $$AIRFLOW__CORE__AIRFLOW_HOME/airflow-webserver.pid ]"]
+            interval: 30s
+            timeout: 30s
+            retries: 3
+
+    apple-worker:
+        build: ../external_tasks/
+        image: task-worker:latest
+networks:
+    net:
